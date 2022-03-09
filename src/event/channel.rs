@@ -1,11 +1,31 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::Arc;
 
 use neon_runtime::raw::Env;
 use neon_runtime::tsfn::ThreadsafeFunction;
 
 use crate::context::{Context, TaskContext};
-use crate::result::NeonResult;
+use crate::result::{NeonResult, ResultExt};
+
+#[cfg(feature = "futures")]
+use {
+    futures_channel::oneshot,
+    std::future::Future,
+    std::pin::Pin,
+    std::task::{self, Poll},
+};
+
+#[cfg(not(feature = "futures"))]
+// Synchronous oneshot channel API compatible with `futures-channel`
+mod oneshot {
+    use std::sync::mpsc;
+
+    pub(super) use std::sync::mpsc::Receiver;
+
+    pub(super) fn channel<T>() -> (mpsc::SyncSender<T>, mpsc::Receiver<T>) {
+        mpsc::sync_channel(1)
+    }
+}
 
 type Callback = Box<dyn FnOnce(Env) + Send + 'static>;
 
@@ -121,7 +141,7 @@ impl Channel {
         T: Send + 'static,
         F: FnOnce(TaskContext) -> NeonResult<T> + Send + 'static,
     {
-        let (tx, rx) = mpsc::sync_channel(1);
+        let (tx, rx) = oneshot::channel();
         let callback = Box::new(move |env| {
             let env = unsafe { std::mem::transmute(env) };
 
@@ -215,16 +235,56 @@ impl Drop for Channel {
 /// thread with [`Channel::send`].
 pub struct JoinHandle<T> {
     // `Err` is always `Throw`, but `Throw` cannot be sent across threads
-    rx: mpsc::Receiver<Result<T, ()>>,
+    rx: oneshot::Receiver<Result<T, ()>>,
 }
 
 impl<T> JoinHandle<T> {
     /// Waits for the associated closure to finish executing
     ///
     /// If the closure panics or throws an exception, `Err` is returned
+    ///
+    /// **Warning**: This should not be called from the JavaScript main thread.
+    /// If it is called from the JavaScript main thread, it will _deadlock_.
+    #[cfg(any(not(feature = "futures"), docsrs))]
+    #[cfg_attr(docsrs, doc(cfg(not(feature = "futures"))))]
     pub fn join(self) -> Result<T, JoinError> {
-        self.rx
-            .recv()
+        #[cfg(feature = "futures")]
+        {
+            unimplemented!("`JoinHandle::join` is not implemented with the `futures` feature")
+        }
+
+        #[cfg(not(feature = "futures"))]
+        JoinError::map_res(self.rx.recv())
+    }
+}
+
+#[cfg(feature = "futures")]
+#[cfg_attr(docsrs, doc(cfg(feature = "futures")))]
+impl<T> Future for JoinHandle<T> {
+    type Output = Result<T, JoinError>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut task::Context) -> Poll<Self::Output> {
+        JoinError::map_poll(&mut self.rx, cx)
+    }
+}
+
+impl JoinError {
+    #[cfg(feature = "futures")]
+    // Helper for writing a `Future` implementation by wrapping a `Future` and
+    // mapping to `Result<T, JoinError>`
+    pub(crate) fn map_poll<T, E>(
+        f: &mut (impl Future<Output = Result<Result<T, ()>, E>> + Unpin),
+        cx: &mut task::Context,
+    ) -> Poll<Result<T, Self>> {
+        match Pin::new(f).poll(cx) {
+            Poll::Ready(result) => Poll::Ready(Self::map_res(result)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+
+    // Helper for mapping a nested `Result` from joining to a `Result<T, JoinError>`
+    pub(crate) fn map_res<T, E>(res: Result<Result<T, ()>, E>) -> Result<T, Self> {
+        res
             // If the sending side dropped without sending, it must have panicked
             .map_err(|_| JoinError(JoinErrorType::Panic))?
             // If the closure returned `Err`, a JavaScript exception was thrown
@@ -237,6 +297,15 @@ impl<T> JoinHandle<T> {
 /// or threw an exception.
 pub struct JoinError(JoinErrorType);
 
+impl JoinError {
+    fn as_str(&self) -> &str {
+        match &self.0 {
+            JoinErrorType::Panic => "Closure panicked before returning",
+            JoinErrorType::Throw => "Closure threw an exception",
+        }
+    }
+}
+
 #[derive(Debug)]
 enum JoinErrorType {
     Panic,
@@ -245,14 +314,17 @@ enum JoinErrorType {
 
 impl std::fmt::Display for JoinError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match &self.0 {
-            JoinErrorType::Panic => f.write_str("Closure panicked before returning"),
-            JoinErrorType::Throw => f.write_str("Closure threw an exception"),
-        }
+        f.write_str(self.as_str())
     }
 }
 
 impl std::error::Error for JoinError {}
+
+impl<T> ResultExt<T> for Result<T, JoinError> {
+    fn or_throw<'a, C: Context<'a>>(self, cx: &mut C) -> NeonResult<T> {
+        self.or_else(|err| cx.throw_error(err.as_str()))
+    }
+}
 
 /// Error indicating that a closure was unable to be scheduled to execute on the event loop.
 ///

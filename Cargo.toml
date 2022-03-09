@@ -27,6 +27,12 @@ smallvec = "1.4.2"
 neon-runtime = { version = "=0.10.0", path = "crates/neon-runtime" }
 neon-macros = { version = "=0.10.0", path = "crates/neon-macros", optional = true }
 
+[dependencies.futures-channel]
+version = "0.3"
+default-features = false
+features = ["alloc"]
+optional = true
+
 [features]
 default = ["legacy-runtime"]
 
@@ -72,12 +78,16 @@ docs-only = ["neon-runtime/docs-only"]
 # DEPRECATED: Will be removed with `legacy-runtime` since it is enabled by default in Node-API backend.
 proc-macros = ["neon-macros"]
 
+# Experimental Rust Futures API
+# https://github.com/neon-bindings/rfcs/pull/46
+futures = ["futures-channel"]
+
 [package.metadata.docs.rs]
 no-default-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 features = [
+    "futures",
     "napi-experimental",
-    "proc-macros",
 ]
 
 [workspace]
@@ -89,5 +99,6 @@ members = [
     "test/static",
     "test/electron",
     "test/dynamic/native",
+    "test/futures",
     "test/napi"
 ]

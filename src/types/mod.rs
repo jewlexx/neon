@@ -122,6 +122,9 @@ pub use self::buffer::types::{JsArrayBuffer, JsBuffer, JsTypedArray};
 #[cfg(feature = "napi-5")]
 pub use self::date::{DateError, DateErrorKind, JsDate};
 pub use self::error::JsError;
+#[cfg(all(feature = "napi-5", feature = "futures"))]
+#[cfg_attr(docsrs, doc(cfg(all(feature = "napi-5", feature = "futures"))))]
+pub use self::promise::JsFuture;
 #[cfg(feature = "napi-1")]
 pub use self::promise::{Deferred, JsPromise};
 

@@ -1,5 +1,5 @@
 use neon::prelude::*;
-use neon::types::buffer::TypedArray;
+use neon::types::buffer::{BorrowError, TypedArray};
 
 pub fn return_js_global_object(mut cx: FunctionContext) -> JsResult<JsObject> {
     Ok(cx.global())
@@ -108,7 +108,7 @@ pub fn read_u8_typed_array(mut cx: FunctionContext) -> JsResult<JsNumber> {
 pub fn copy_typed_array(mut cx: FunctionContext) -> JsResult<JsUndefined> {
     let source = cx.argument::<JsTypedArray<u32>>(0)?;
     let mut dest = cx.argument::<JsTypedArray<u32>>(1)?;
-    let mut run = || {
+    let mut run = || -> Result<_, BorrowError> {
         let lock = cx.lock();
         let source = source.try_borrow(&lock)?;
         let mut dest = dest.try_borrow_mut(&lock)?;
